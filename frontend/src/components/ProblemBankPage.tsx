@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { useInterviewStore } from '../store/interview';
 import { useToastStore } from '../store/toast';
 import { getProblems, deleteProblem, isUsingMockData } from '../services/problemService';
@@ -14,15 +14,18 @@ export const ProblemBankPage: React.FC = () => {
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedDifficulty, setSelectedDifficulty] = useState<string>('all');
   const [selectedTag, setSelectedTag] = useState<string>('');
+  const [availableTags, setAvailableTags] = useState<string[]>([]);
   const [loading, setLoading] = useState(false);
   const [deleteConfirmId, setDeleteConfirmId] = useState<string | null>(null);
   const [mockMode, setMockMode] = useState(false);
+  const loadSeqRef = useRef(0);
 
   useEffect(() => {
     loadProblems();
   }, [selectedDifficulty, selectedTag]);
 
   const loadProblems = async () => {
+    const seq = ++loadSeqRef.current;
     setLoading(true);
     try {
       const params: { difficulty?: string; tag?: string } = {};
@@ -32,7 +35,34 @@ export const ProblemBankPage: React.FC = () => {
       if (selectedTag) {
         params.tag = selectedTag;
       }
-      const data = await getProblems(params);
+      // 标签条件的判定口径：当前难度下的完整题目列表（不含标签条件）。
+      // 未选标签时，本次加载结果本身就是该口径，无需额外请求。
+      const universeParams: { difficulty?: string } = {};
+      if (selectedDifficulty !== 'all') {
+        universeParams.difficulty = selectedDifficulty;
+      }
+      const [data, tagUniverse] = await Promise.all([
+        getProblems(params),
+        selectedTag ? getProblems(universeParams) : Promise.resolve(null),
+      ]);
+      if (seq !== loadSeqRef.current) return;
+
+      const tags = Array.from(
+        new Set((tagUniverse ?? data).flatMap(p => p.tags))
+      ).filter(t => t);
+      setAvailableTags(tags);
+
+      if (selectedTag && !tags.includes(selectedTag)) {
+        // 数据源变化（切换难度、删除/修改题目）后当前标签条件已不再满足：
+        // 自动清除并说明原因，清除后会触发重新加载，恢复合理的筛选状态。
+        const reason = selectedDifficulty === 'all'
+          ? `标签「${selectedTag}」在当前题库中已没有对应题目`
+          : `标签「${selectedTag}」在「${getDifficultyTag(selectedDifficulty).label}」难度下已没有对应题目`;
+        setSelectedTag('');
+        warning(`${reason}，已自动清除该标签筛选`);
+        return;
+      }
+
       setProblems(data);
       const usingMock = isUsingMockData();
       setMockMode(usingMock);
@@ -41,10 +71,13 @@ export const ProblemBankPage: React.FC = () => {
       }
       info(`已加载 ${data.length} 道题目`);
     } catch (err) {
+      if (seq !== loadSeqRef.current) return;
       console.error('Failed to load problems:', err);
       error('加载题目列表失败，请稍后重试');
     } finally {
-      setLoading(false);
+      if (seq === loadSeqRef.current) {
+        setLoading(false);
+      }
     }
   };
 
@@ -69,6 +102,8 @@ export const ProblemBankPage: React.FC = () => {
       removeProblem(deleteConfirmId);
       setDeleteConfirmId(null);
       success('题目删除成功');
+      // 删除后按当前数据源重新加载，失效的标签筛选会被自动清除并提示
+      loadProblems();
     } catch (err) {
       console.error('Failed to delete problem:', err);
       error('删除题目失败，请稍后重试');
@@ -93,8 +128,6 @@ export const ProblemBankPage: React.FC = () => {
       p.tags.some(t => t.toLowerCase().includes(query))
     );
   });
-
-  const allTags = Array.from(new Set(problems.flatMap(p => p.tags))).filter(t => t);
 
   const inputStyle = {
     padding: '10px 16px',
@@ -229,7 +262,7 @@ export const ProblemBankPage: React.FC = () => {
             </div>
           </div>
 
-          {allTags.length > 0 && (
+          {availableTags.length > 0 && (
             <div style={{ minWidth: '200px' }}>
               <label style={{ color: '#888', fontSize: '12px', marginBottom: '4px', display: 'block' }}>标签筛选</label>
               <select
@@ -238,7 +271,7 @@ export const ProblemBankPage: React.FC = () => {
                 style={{ ...inputStyle, width: '100%' }}
               >
                 <option value="">所有标签</option>
-                {allTags.map(tag => (
+                {availableTags.map(tag => (
                   <option key={tag} value={tag}>{tag}</option>
                 ))}
               </select>
