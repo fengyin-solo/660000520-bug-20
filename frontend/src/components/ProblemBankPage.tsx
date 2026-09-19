@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { useInterviewStore } from '../store/interview';
 import { useToastStore } from '../store/toast';
 import { getProblems, deleteProblem, isUsingMockData } from '../services/problemService';
@@ -14,13 +14,31 @@ export const ProblemBankPage: React.FC = () => {
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedDifficulty, setSelectedDifficulty] = useState<string>('all');
   const [selectedTag, setSelectedTag] = useState<string>('');
+  // 标签口径数据：当前难度范围（不含标签筛选）的题目集合，用于判定标签条件是否有效及生成标签选项
+  const [tagScopeProblems, setTagScopeProblems] = useState<Problem[]>([]);
   const [loading, setLoading] = useState(false);
   const [deleteConfirmId, setDeleteConfirmId] = useState<string | null>(null);
   const [mockMode, setMockMode] = useState(false);
+  // 自动清除失效标签时已同步好列表数据，需跳过一次由状态变化触发的重复加载
+  const skipNextLoadRef = useRef(false);
 
   useEffect(() => {
+    if (skipNextLoadRef.current) {
+      skipNextLoadRef.current = false;
+      return;
+    }
     loadProblems();
   }, [selectedDifficulty, selectedTag]);
+
+  // 标签条件失效时自动清除，并说明清除原因
+  const clearStaleTag = (tag: string) => {
+    skipNextLoadRef.current = true;
+    setSelectedTag('');
+    const scopeLabel = selectedDifficulty === 'all'
+      ? '当前题库'
+      : `「${getDifficultyTag(selectedDifficulty).label}」难度`;
+    warning(`${scopeLabel}中已没有标签为「${tag}」的题目，已自动清除该标签筛选`);
+  };
 
   const loadProblems = async () => {
     setLoading(true);
@@ -32,7 +50,22 @@ export const ProblemBankPage: React.FC = () => {
       if (selectedTag) {
         params.tag = selectedTag;
       }
-      const data = await getProblems(params);
+      let data = await getProblems(params);
+
+      // 标签条件按当前数据源口径（当前难度范围、不含标签筛选）重新判定
+      let scopeData = data;
+      if (selectedTag) {
+        const scopeParams: { difficulty?: string } = {};
+        if (selectedDifficulty !== 'all') {
+          scopeParams.difficulty = selectedDifficulty;
+        }
+        scopeData = await getProblems(scopeParams);
+        if (!scopeData.some(p => p.tags.includes(selectedTag))) {
+          clearStaleTag(selectedTag);
+          data = scopeData;
+        }
+      }
+      setTagScopeProblems(scopeData);
       setProblems(data);
       const usingMock = isUsingMockData();
       setMockMode(usingMock);
@@ -67,6 +100,13 @@ export const ProblemBankPage: React.FC = () => {
     try {
       await deleteProblem(deleteConfirmId);
       removeProblem(deleteConfirmId);
+      // 删除后数据源变化，按当前口径重新判定标签条件是否仍然有效
+      const nextScope = tagScopeProblems.filter(p => p.id !== deleteConfirmId);
+      setTagScopeProblems(nextScope);
+      if (selectedTag && !nextScope.some(p => p.tags.includes(selectedTag))) {
+        clearStaleTag(selectedTag);
+        setProblems(nextScope);
+      }
       setDeleteConfirmId(null);
       success('题目删除成功');
     } catch (err) {
@@ -94,7 +134,8 @@ export const ProblemBankPage: React.FC = () => {
     );
   });
 
-  const allTags = Array.from(new Set(problems.flatMap(p => p.tags))).filter(t => t);
+  // 标签选项来自当前难度口径的数据源（不含标签筛选），避免选项随筛选结果坍缩、失效条件残留
+  const allTags = Array.from(new Set(tagScopeProblems.flatMap(p => p.tags))).filter(t => t);
 
   const inputStyle = {
     padding: '10px 16px',
